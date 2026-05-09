@@ -1,8 +1,8 @@
 build:
-	make -C src
+	make -C hub
 
 clean:
-	make -C src clean
+	make -C hub clean
 
 install:
 	sudo apt update
