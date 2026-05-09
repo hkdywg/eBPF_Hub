@@ -13,6 +13,29 @@ MAKEFILE_V :=
 MAKE_PARA := -s
 
 ###################################################
+# BUILD TYPE CONFIGURATION
+###################################################
+
+# Build type: debug, release, size (default: release)
+BUILD_TYPE ?= release
+
+ifeq ($(BUILD_TYPE),debug)
+CFLAGS_OPT := -O0 -g3 -DDEBUG
+LDFLAGS_OPT :=
+else ifeq ($(BUILD_TYPE),release)
+CFLAGS_OPT := -O2 -g -DNDEBUG
+LDFLAGS_OPT :=
+else ifeq ($(BUILD_TYPE),size)
+CFLAGS_OPT := -Os -g -DNDEBUG
+LDFLAGS_OPT :=
+else
+$(error Invalid BUILD_TYPE: $(BUILD_TYPE). Valid options: debug, release, size)
+endif
+
+# Strip release binaries by default
+STRIP_RELEASE ?= yes
+
+###################################################
 # TOOLCHAIN CONFIG
 ###################################################
 
@@ -35,23 +58,26 @@ ARCH := arm64
 CONFIGURE_FLAGS := --target=aarch64-linux-gnu --host=aarch64-linux-gnu --build=x86_64-linux
 endif
 
+# Default to native compilation if no cross-compile config
+ifndef CROSS_COMPILE_CONFIG
+CROSS_COMPILE_CONFIG :=
+ARCH ?= x86
+endif
+
 CC 		:= $(CROSS_COMPILE_CONFIG)gcc
 CXX 	:= $(CROSS_COMPILE_CONFIG)g++
 AS 		:= $(CROSS_COMPILE_CONFIG)as
 LD 		:= $(CROSS_COMPILE_CONFIG)ld
 STRIP 	:= $(CROSS_COMPILE_CONFIG)strip
 OBJCOPY := $(CROSS_COMPILE_CONFIG)objcopy
-OBJDUMP := $(CROSS_COMPILE_CONFIG)objdumo
+OBJDUMP := $(CROSS_COMPILE_CONFIG)objdump
 AR 		:= $(CROSS_COMPILE_CONFIG)ar
 NM 		:= $(CROSS_COMPILE_CONFIG)nm
 
-
+ifdef TOOL_CHAIN_NAME
 HOST_DIR 		:= $(BUILD_TOPDIR)/out/toolchain/$(TOOL_CHAIN_NAME)
 LOCAL_CFLAGS 	:= -I$(HOST_DIR)/include
-LOCAL_LDFLAGS 	:= -L$(HOST_DIR)/lib -WL,-rpath,$(HOST_DIR)/lib
-
-ifndef CC
-$(error Can not find cross compile toolchain, please source ENV File)
+LOCAL_LDFLAGS 	:= -L$(HOST_DIR)/lib -Wl,-rpath,$(HOST_DIR)/lib
 endif
 
 ###################################################
@@ -69,11 +95,30 @@ BPFTOOL := $(BPFTOOL_BUILD_OUTPUT)/bootstrap/bpftool
 ARCH ?= x86
 VMLINUX := $(BUILD_TOPDIR)/vmlinux/$(ARCH)/vmlinux.h
 
+###################################################
+# TOOL VERSION CHECK
+###################################################
+
+# Check minimum clang version (>= 10 required for BPF CO-RE)
+CLANG_VERSION := $(shell $(CLANG) --version 2>/dev/null | grep -oE 'clang version [0-9]+' | grep -oE '[0-9]+' | head -1)
+ifeq ($(CLANG_VERSION),)
+$(error Cannot detect clang version. Please install clang >= 10)
+endif
+ifneq ($(shell test $(CLANG_VERSION) -ge 10 && echo true),true)
+$(error clang version $(CLANG_VERSION) is too old. Minimum required: 10. Install newer clang.)
+endif
+
+# Verify LLVM tools are available
+LLVM_STRIP_CHECK := $(shell $(LLVM_STRIP) --version 2>/dev/null)
+ifeq ($(LLVM_STRIP_CHECK),)
+$(error llvm-strip not found. Install llvm package.)
+endif
+
 # Use our own libbpf API headers and Linux UAPI headers distributed with
 # libbpf to avoid dependency on system-wide headers
 INCLUDES := -I$(BUILD_OUTPUT) -I$(BUILD_TOPDIR)/libbpf/include/uapi -I$(dir $(VMLINUX))
-CFLAGS := -g -Wall
-ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS)
+CFLAGS := $(CFLAGS_OPT) -Wall -Werror $(EXTRA_CFLAGS) $(LOCAL_CFLAGS)
+ALL_LDFLAGS := $(LDFLAGS) $(LDFLAGS_OPT) $(EXTRA_LDFLAGS) $(LOCAL_LDFLAGS)
 
 # Get Clang's default includes on this system.
 CLANG_BPF_SYS_INCLUDES = $(shell $(CLANG) -v -E - </dev/null 2>&1 \

@@ -48,6 +48,12 @@ endef
 ###################################################
 # Build message output
 ###################################################
+
+# msg function used in build rules
+# Arguments: action, target, optional note
+msg = @printf '  %-8s %s\n' "$(1)" "$(2)"
+
+# build-msg for comprehensive logging
 define build-msg
 @printf ' %-8s %s%s\n'	\
 	  "$(1)"					\
@@ -55,6 +61,9 @@ define build-msg
 	  "$(if $(3), $(3))";
 MAKEFLAGS += --no-print-directory
 endef
+
+# Quiet make output (Q prefix for commands)
+Q ?= @
 
 ###################################################
 # Download package
@@ -64,13 +73,20 @@ GIT  := git
 
 ###################################################
 # Download package
-# Argument 1 is the source location
-# Argument 2 is the package name
-# Argument 3 is the download methed
-# Argument 3 is a space-separated list of optional argument
+# Argument 1 is the source location (URL)
+# Argument 2 is the package name (for directory naming)
+# Argument 3 is the download method (wget/git)
+# Argument 4 is optional extra parameters
 ###################################################
 define download-package
-	$(Q)mkdir -p $($(2)_DL_DIR)	
+	$(Q)mkdir -p $($(2)_DL_DIR)
+	$(Q)cd $($(2)_DL_DIR) && \
+	if [ "$(3)" = "git" ]; then \
+		$(GIT) clone $(4) $(1) $(2); \
+	else \
+		$(WGET) $(4) $(1); \
+	fi
+	$(call msg,DOWNLOAD,$(2))
 endef
 
 

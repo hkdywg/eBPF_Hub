@@ -45,7 +45,7 @@ $(LOCAL_MODULE_PATH) $(BUILD_OUTPUT) $(BUILD_OUTPUT)/libbpf $(BPFTOOL_BUILD_OUTP
 # Build libbpf
 $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(BUILD_OUTPUT)/libbpf $(LOCAL_PATH)/make.inc
 	$(call msg,LIB,$@)
-	$(Q)$(MAKE) -C $(LIBBPF_SRC) BUILD_STATIC_ONLY=1 \
+	$(Q)$(MAKE) $(MAKEFLAGS) -C $(LIBBPF_SRC) BUILD_STATIC_ONLY=1 \
 		OBJDIR=$(dir $@)/libbpf DESTDIR=$(dir $@) \
 		INCLUDEDIR= LIBDIR= UAPIDIR= \
 		install
@@ -53,14 +53,17 @@ $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(BUILD
 # Build bpftool
 $(BPFTOOL): | $(BPFTOOL_BUILD_OUTPUT) $(LOCAL_PATH)/make.inc
 	$(call msg,BPFTOOL,$@)
-	$(Q)$(MAKE) ARCH= CROSS_COMPILE= OUTPUT=$(BPFTOOL_BUILD_OUTPUT)/ -C $(BPFTOOL_SRC) bootstrap
+	$(Q)$(MAKE) $(MAKEFLAGS) ARCH= CROSS_COMPILE= OUTPUT=$(BPFTOOL_BUILD_OUTPUT)/ -C $(BPFTOOL_SRC) bootstrap
 
 # Build BPF code
 $(LOCAL_OBJS_BPF): $(LOCAL_MODULE_PATH) $(LOCAL_BPF_C) $(LIBBPF_OBJ) $(LOCAL_PATH)/make.inc
 	$(call msg,BPF,$@)
-	$(Q)$(CLANG) -g -O2 -fno-stack-protector -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) \
-		$(CLANG_BPF_SYS_INCLUDES) -c $(filter %.c,$^) -o $@
-	$(Q)$(LLVM_STRIP) -g $@ # strip useless DWARF info 
+	$(Q)$(CLANG) -g -O2 -fno-stack-protector -fno-asynchronous-unwind-tables \
+		-target bpf -D__TARGET_ARCH_$(ARCH) \
+		$(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) \
+		-c $(filter %.c,$^) -o $@.tmp
+	$(Q)$(LLVM_STRIP) -g $@.tmp -o $@
+	$(Q)rm -f $@.tmp 
 
 # Generate BPF skeletons
 $(LOCAL_SKEL_H): $(LOCAL_OBJS_BPF) $(BPFTOOL) $(LOCAL_PATH)/make.inc
@@ -76,10 +79,21 @@ $(BUILD_OUTPUT)/%.o: $(BUILD_TOPDIR)/%.c $(LOCAL_SKEL_H) $(LOCAL_PATH)/make.inc
 $(LOCAL_MODULE): $(LOCAL_OBJS_C)  $(LIBBPF_OBJ)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $^ $(ALL_LDFLAGS) -lelf -lz -o $@
+ifeq ($(BUILD_TYPE),release)
+ifeq ($(STRIP_RELEASE),yes)
+	$(call msg,STRIP,$@)
+	$(Q)$(STRIP) --strip-unneeded $@
+endif
+endif
+
+# Clean target for this module
+.PHONY: clean-$(LOCAL_TARGET)
+clean-$(LOCAL_TARGET):
+	$(call msg,CLEAN,$(LOCAL_TARGET))
+	$(Q)rm -f $(LOCAL_MODULE) $(LOCAL_OBJS_C) $(LOCAL_OBJS_BPF) $(LOCAL_SKEL_H)
 
 # delete failed targets
 .DELETE_ON_ERROR:
-
 
 # keep intermediate (.skel.h, .bpf.o, etc) targets
 .SECONDARY:
