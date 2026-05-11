@@ -23,7 +23,6 @@ build_output/
 *.bpf.o
 
 # Executables
-bootstrap
 *.out
 *.exe
 
