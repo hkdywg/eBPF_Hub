@@ -36,51 +36,6 @@ endif
 STRIP_RELEASE ?= yes
 
 ###################################################
-# TOOLCHAIN CONFIG
-###################################################
-
-ifeq ($(CONFIG_LINUX_KERNEL_CROSS_COMPILE),"arm-linux-gnueabi")
-TOOL_CHAIN_NAME := $(basename $(basename $(notdir $(CONFIG_ARM_GNUEABI_FULL_NAME))))
-CROSS_COMPILE_CONFIG := $(BUILD_TOPDIR)/output/toolchain/$(TOOL_CHAIN_NAME)/bin/arm-linux-gnueabi-
-ARCH := arm
-CONFIGURE_FLAGS := --target=arm-linux-gnueabi --host=arm-linux-gnueabi --build=x86_64-linux
-endif
-ifeq ($(CONFIG_LINUX_KERNEL_CROSS_COMPILE),"arm-linux-gnueabihf")
-TOOL_CHAIN_NAME := $(basename $(basename $(notdir $(CONFIG_ARM_GNUEABIHF_FULL_NAME))))
-CROSS_COMPILE_CONFIG := $(BUILD_TOPDIR)/output/toolchain/$(TOOL_CHAIN_NAME)/bin/arm-linux-gnueabihf-
-ARCH := arm
-CONFIGURE_FLAGS := --target=arm-linux-gnueabihf --host=arm-linux-gnueabihf --build=x86_64-linux
-endif
-ifeq ($(CONFIG_LINUX_KERNEL_CROSS_COMPILE),"aarch64-linux-gnu")
-TOOL_CHAIN_NAME := $(basename $(basename $(notdir $(CONFIG_AARCH64_FULL_NAME))))
-CROSS_COMPILE_CONFIG := $(BUILD_TOPDIR)/output/toolchain/$(TOOL_CHAIN_NAME)/bin/aarch64-linux-gnu-
-ARCH := arm64
-CONFIGURE_FLAGS := --target=aarch64-linux-gnu --host=aarch64-linux-gnu --build=x86_64-linux
-endif
-
-# Default to native compilation if no cross-compile config
-ifndef CROSS_COMPILE_CONFIG
-CROSS_COMPILE_CONFIG :=
-ARCH ?= x86
-endif
-
-CC 		:= $(CROSS_COMPILE_CONFIG)gcc
-CXX 	:= $(CROSS_COMPILE_CONFIG)g++
-AS 		:= $(CROSS_COMPILE_CONFIG)as
-LD 		:= $(CROSS_COMPILE_CONFIG)ld
-STRIP 	:= $(CROSS_COMPILE_CONFIG)strip
-OBJCOPY := $(CROSS_COMPILE_CONFIG)objcopy
-OBJDUMP := $(CROSS_COMPILE_CONFIG)objdump
-AR 		:= $(CROSS_COMPILE_CONFIG)ar
-NM 		:= $(CROSS_COMPILE_CONFIG)nm
-
-ifdef TOOL_CHAIN_NAME
-HOST_DIR 		:= $(BUILD_TOPDIR)/out/toolchain/$(TOOL_CHAIN_NAME)
-LOCAL_CFLAGS 	:= -I$(HOST_DIR)/include
-LOCAL_LDFLAGS 	:= -L$(HOST_DIR)/lib -Wl,-rpath,$(HOST_DIR)/lib
-endif
-
-###################################################
 # BUILD OUT DIRECTORY
 ###################################################
 BUILD_OUTPUT 		:= $(BUILD_TOPDIR)/build_output
@@ -130,5 +85,4 @@ CLANG_BPF_SYS_INCLUDES = $(shell $(CLANG) -v -E - </dev/null 2>&1 \
 
 CLEAR_VARS := $(BUILD_TOPDIR)/build_core/clear_vars.mk
 BUILD_APP := $(BUILD_TOPDIR)/build_core/build_app.mk
-BUILD_DRIVER := $(BUILD_TOPDIR)/build_core/build_driver.mk
 

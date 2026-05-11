@@ -37,6 +37,9 @@ LOCAL_MODULE_PATH := $(dir $(LOCAL_MODULE))
 
 INCLUDES += -I$(dir $(LOCAL_SKEL_H))
 
+# Skip path-based targets for bash-completion mode
+ifeq ($(__BASH_MAKE_COMPLETION__),)
+
 # build output path create
 $(LOCAL_MODULE_PATH) $(BUILD_OUTPUT) $(BUILD_OUTPUT)/libbpf $(BPFTOOL_BUILD_OUTPUT):
 	$(call msg,MKDIR,$@)
@@ -79,12 +82,6 @@ $(BUILD_OUTPUT)/%.o: $(BUILD_TOPDIR)/%.c $(LOCAL_SKEL_H) $(LOCAL_PATH)/make.inc
 $(LOCAL_MODULE): $(LOCAL_OBJS_C)  $(LIBBPF_OBJ)
 	$(call msg,BINARY,$@)
 	$(Q)$(CC) $(CFLAGS) $^ $(ALL_LDFLAGS) -lelf -lz -o $@
-ifeq ($(BUILD_TYPE),release)
-ifeq ($(STRIP_RELEASE),yes)
-	$(call msg,STRIP,$@)
-	$(Q)$(STRIP) --strip-unneeded $@
-endif
-endif
 
 # Clean target for this module
 .PHONY: clean-$(LOCAL_TARGET)
@@ -97,4 +94,6 @@ clean-$(LOCAL_TARGET):
 
 # keep intermediate (.skel.h, .bpf.o, etc) targets
 .SECONDARY:
+
+endif # __BASH_MAKE_COMPLETION__
 
