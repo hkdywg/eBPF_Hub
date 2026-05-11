@@ -46,7 +46,7 @@ $(LOCAL_MODULE_PATH) $(BUILD_OUTPUT) $(BUILD_OUTPUT)/libbpf $(BPFTOOL_BUILD_OUTP
 	$(Q)mkdir -p $@
 
 # Build libbpf
-$(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(BUILD_OUTPUT)/libbpf $(LOCAL_PATH)/make.inc
+$(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(BUILD_OUTPUT)/libbpf 
 	$(call msg,LIB,$@)
 	$(Q)$(MAKE) $(MAKEFLAGS) -C $(LIBBPF_SRC) BUILD_STATIC_ONLY=1 \
 		OBJDIR=$(dir $@)/libbpf DESTDIR=$(dir $@) \
@@ -54,12 +54,12 @@ $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(BUILD
 		install
 
 # Build bpftool
-$(BPFTOOL): | $(BPFTOOL_BUILD_OUTPUT) $(LOCAL_PATH)/make.inc
+$(BPFTOOL): | $(BPFTOOL_BUILD_OUTPUT) 
 	$(call msg,BPFTOOL,$@)
 	$(Q)$(MAKE) $(MAKEFLAGS) ARCH= CROSS_COMPILE= OUTPUT=$(BPFTOOL_BUILD_OUTPUT)/ -C $(BPFTOOL_SRC) bootstrap
 
 # Build BPF code
-$(LOCAL_OBJS_BPF): $(LOCAL_MODULE_PATH) $(LOCAL_BPF_C) $(LIBBPF_OBJ) $(LOCAL_PATH)/make.inc
+$(LOCAL_OBJS_BPF): $(LOCAL_MODULE_PATH) $(LOCAL_BPF_C) $(LIBBPF_OBJ)
 	$(call msg,BPF,$@)
 	$(Q)$(CLANG) -g -O2 -fno-stack-protector -fno-asynchronous-unwind-tables \
 		-target bpf -D__TARGET_ARCH_$(ARCH) \
@@ -69,12 +69,12 @@ $(LOCAL_OBJS_BPF): $(LOCAL_MODULE_PATH) $(LOCAL_BPF_C) $(LIBBPF_OBJ) $(LOCAL_PAT
 	$(Q)rm -f $@.tmp 
 
 # Generate BPF skeletons
-$(LOCAL_SKEL_H): $(LOCAL_OBJS_BPF) $(BPFTOOL) $(LOCAL_PATH)/make.inc
+$(LOCAL_SKEL_H): $(LOCAL_OBJS_BPF) $(BPFTOOL)
 	$(call msg,GEN-SKEL,$@)
 	$(Q)$(BPFTOOL) gen skeleton $< > $@
 
 # Build user-space code
-$(BUILD_OUTPUT)/%.o: $(BUILD_TOPDIR)/%.c $(LOCAL_SKEL_H) $(LOCAL_PATH)/make.inc
+$(BUILD_OUTPUT)/%.o: $(BUILD_TOPDIR)/%.c $(LOCAL_SKEL_H)
 	$(call msg,CC,$@)
 	$(Q)cc $(CFLAGS) $(INCLUDES) -c $< -o $@ 
 
