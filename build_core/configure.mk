@@ -44,11 +44,27 @@ CLANG ?= clang
 LLVM_STRIP ?= llvm-strip
 LIBBPF_SRC := $(BUILD_TOPDIR)/libbpf/src
 BPFTOOL_SRC := $(BUILD_TOPDIR)/bpftool/src
+BLAZESYM_SRC := $(BUILD_TOPDIR)/blazesym
 LIBBPF_OBJ := $(BUILD_OUTPUT)/libbpf.a
 BPFTOOL_BUILD_OUTPUT := $(BUILD_OUTPUT)/bpftool
 BPFTOOL := $(BPFTOOL_BUILD_OUTPUT)/bootstrap/bpftool
+BLAZESYM_BUILD_OUTPUT := $(BUILD_OUTPUT)/blazesym
+BLAZESYM_LIB := $(BLAZESYM_BUILD_OUTPUT)/libblazesym_c.a
+BLAZESYM_INCLUDE := $(BLAZESYM_SRC)/capi/include
 ARCH ?= x86
 VMLINUX := $(BUILD_TOPDIR)/vmlinux/$(ARCH)/vmlinux.h
+
+###################################################
+# USE_BLAZESYM CONFIGURATION
+###################################################
+
+ifdef USE_BLAZESYM
+BLAZESYM_CFLAGS := -DUSE_BLAZESYM -I$(BLAZESYM_INCLUDE)
+BLAZESYM_LDFLAGS := $(BLAZESYM_LIB) -lrt -ldl -lpthread -lm
+else
+BLAZESYM_CFLAGS :=
+BLAZESYM_LDFLAGS :=
+endif
 
 ###################################################
 # TOOL VERSION CHECK
@@ -69,11 +85,19 @@ ifeq ($(LLVM_STRIP_CHECK),)
 $(error llvm-strip not found. Install llvm package.)
 endif
 
+# Check cargo for blazesym build (only when USE_BLAZESYM is enabled)
+ifdef USE_BLAZESYM
+CARGO_CHECK := $(shell cargo --version 2>/dev/null)
+ifeq ($(CARGO_CHECK),)
+$(error cargo not found. Install Rust toolchain for blazesym build.)
+endif
+endif
+
 # Use our own libbpf API headers and Linux UAPI headers distributed with
 # libbpf to avoid dependency on system-wide headers
-INCLUDES := -I$(BUILD_OUTPUT) -I$(BUILD_TOPDIR)/libbpf/include/uapi -I$(dir $(VMLINUX))
+INCLUDES := -I$(BUILD_OUTPUT) -I$(BUILD_TOPDIR)/libbpf/include/uapi -I$(dir $(VMLINUX)) $(BLAZESYM_CFLAGS)
 CFLAGS := $(CFLAGS_OPT) -Wall -Werror $(EXTRA_CFLAGS) $(LOCAL_CFLAGS)
-ALL_LDFLAGS := $(LDFLAGS) $(LDFLAGS_OPT) $(EXTRA_LDFLAGS) $(LOCAL_LDFLAGS)
+ALL_LDFLAGS := $(LDFLAGS) $(LDFLAGS_OPT) $(EXTRA_LDFLAGS) $(LOCAL_LDFLAGS) $(BLAZESYM_LDFLAGS)
 
 # Get Clang's default includes on this system.
 CLANG_BPF_SYS_INCLUDES = $(shell $(CLANG) -v -E - </dev/null 2>&1 \
