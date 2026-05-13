@@ -105,29 +105,12 @@ static void sig_handler(int signo);
 
 static long argp_parse_long(int key, const char *arg, struct argp_state *state);
 static error_t argp_parse_arg(int key, char *arg, struct argp_state *state);
-
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args);
-
-static int event_init(int *fd);
-static int event_wait(int fd, uint64_t expected_event);
-static int event_notify(int fd, uint64_t event);
-
-static pid_t fork_sync_exec(const char *command, int fd);
-
-static void print_stack_frames_by_ksyms();
 static void print_stack_frames_by_syms_cache();
 static int print_stack_frames(struct allocation *allocs, size_t nr_allocs, int stack_traces_fd);
-
 static int alloc_size_compare(const void *a, const void *b);
-
 static int print_outstanding_allocs(int allocs_fd, int stack_traces_fd);
-static int print_outstanding_combined_allocs(int combined_allocs_fd, int stack_traces_fd);
-
-static bool has_kernel_node_tracepoints();
-static void disable_kernel_node_tracepoints(struct memleak_bpf *skel);
-static void disable_kernel_percpu_tracepoints(struct memleak_bpf *skel);
 static void disable_kernel_tracepoints(struct memleak_bpf *skel);
-
 static int attach_uprobes(struct memleak_bpf *skel);
 
 const char *argp_program_version = "memleak 0.1";
@@ -157,9 +140,6 @@ static volatile sig_atomic_t child_exited;
 static struct sigaction sig_action = {
 	.sa_handler = sig_handler
 };
-
-__attribute__((unused))
-static int child_exec_event_fd = -1;
 
 struct syms_cache *syms_cache;
 struct ksyms *ksyms;
@@ -366,118 +346,6 @@ void sig_handler(int signo)
 	exiting = 1;
 }
 
-__attribute__((unused))
-int event_init(int *fd)
-{
-	if (!fd) {
-		fprintf(stderr, "pointer to fd is null\n");
-
-		return 1;
-	}
-
-	const int tmp_fd = eventfd(0, EFD_CLOEXEC);
-	if (tmp_fd < 0) {
-		perror("failed to create event fd");
-
-		return -errno;
-	}
-
-	*fd = tmp_fd;
-
-	return 0;
-}
-
-int event_wait(int fd, uint64_t expected_event)
-{
-	uint64_t event = 0;
-	const ssize_t bytes = read(fd, &event, sizeof(event));
-	if (bytes < 0) {
-		perror("failed to read from fd");
-
-		return -errno;
-	} else if (bytes != sizeof(event)) {
-		fprintf(stderr, "read unexpected size\n");
-
-		return 1;
-	}
-
-	if (event != expected_event) {
-		fprintf(stderr, "read event %lu, expected %lu\n", event, expected_event);
-
-		return 1;
-	}
-
-	return 0;
-}
-
-__attribute__((unused))
-int event_notify(int fd, uint64_t event)
-{
-	const ssize_t bytes = write(fd, &event, sizeof(event));
-	if (bytes < 0) {
-		perror("failed to write to fd");
-
-		return -errno;
-	} else if (bytes != sizeof(event)) {
-		fprintf(stderr, "attempted to write %zu bytes, wrote %zd bytes\n", sizeof(event), bytes);
-
-		return 1;
-	}
-
-	return 0;
-}
-
-__attribute__((unused))
-pid_t fork_sync_exec(const char *command, int fd)
-{
-	const pid_t pid = fork();
-
-	switch (pid) {
-	case -1:
-		perror("failed to create child process");
-		break;
-	case 0: {
-		const uint64_t event = 1;
-		if (event_wait(fd, event)) {
-			fprintf(stderr, "failed to wait on event");
-			exit(EXIT_FAILURE);
-		}
-
-		printf("received go event. executing child command\n");
-
-		const int err = execl(command, command, NULL);
-		if (err) {
-			perror("failed to execute child command");
-			return -1;
-		}
-
-		break;
-	}
-	default:
-		printf("child created with pid: %d\n", pid);
-
-		break;
-	}
-
-	return pid;
-}
-
-__attribute__((unused))
-void print_stack_frames_by_ksyms()
-{
-	for (size_t i = 0; i < env.perf_max_stack_depth; ++i) {
-		const uint64_t addr = stack[i];
-
-		if (addr == 0)
-			break;
-
-		const struct ksym *ksym = ksyms__map_addr(ksyms, addr);
-		if (ksym)
-			printf("\t%zu [<%016lx>] %s+0x%lx\n", i, addr, ksym->name, addr - ksym->addr);
-		else
-			printf("\t%zu [<%016lx>] <%s>\n", i, addr, "null sym");
-	}
-}
 
 void print_stack_frames_by_syms_cache()
 {
@@ -624,10 +492,12 @@ int print_outstanding_allocs(int allocs_fd, int stack_traces_fd)
 	// sort the allocs array in descending order
 	qsort(allocs, nr_allocs, sizeof(allocs[0]), alloc_size_compare);
 
-	printf("[%d:%d:%d] Top %zu stacks with outstanding allocations:\n",
-			tm->tm_hour, tm->tm_min, tm->tm_sec, nr_allocs);
+    if (nr_allocs) {
+        printf("[%d:%d:%d] Top %zu stacks with outstanding allocations:\n",
+                tm->tm_hour, tm->tm_min, tm->tm_sec, nr_allocs);
 
-	print_stack_frames(allocs, nr_allocs, stack_traces_fd);
+        print_stack_frames(allocs, nr_allocs, stack_traces_fd);
+    }
 
 	for (size_t i = 0; i < nr_allocs; i++) {
 		allocs[i].stack_id = 0;
@@ -641,100 +511,6 @@ int print_outstanding_allocs(int allocs_fd, int stack_traces_fd)
 	}
 
 	return 0;
-}
-
-__attribute__((unused))
-int print_outstanding_combined_allocs(int combined_allocs_fd, int stack_traces_fd)
-{
-	time_t t = time(NULL);
-	struct tm *tm = localtime(&t);
-
-	size_t nr_allocs = 0;
-	size_t nr_missing_stacks = 0;
-	size_t nr_collision_stacks = 0;
-
-	// for each stack_id "curr_key" and union combined_alloc_info "alloc"
-	// in bpf_map "combined_allocs"
-	for (uint64_t prev_key = 0, curr_key = 0;; prev_key = curr_key) {
-		union combined_alloc_info combined_alloc_info;
-		memset(&combined_alloc_info, 0, sizeof(combined_alloc_info));
-
-		if (bpf_map_get_next_key(combined_allocs_fd, &prev_key, &curr_key)) {
-			if (errno == ENOENT) {
-				break; // no more keys, done
-			}
-
-			perror("map get next key error");
-
-			return -errno;
-		}
-
-		if (bpf_map_lookup_elem(combined_allocs_fd, &curr_key, &combined_alloc_info)) {
-			if (errno == ENOENT)
-				continue;
-
-			perror("map lookup error");
-
-			return -errno;
-		}
-
-		const struct allocation alloc = {
-			.stack_id = curr_key,
-			.size = combined_alloc_info.total_size,
-			.count = combined_alloc_info.number_of_allocs,
-			.allocations = NULL
-		};
-
-		// filter invalid stacks
-		if (alloc.stack_id < 0) {
-			/* handle stack id errors */
-			if (STACK_ID_ERR(alloc.stack_id))
-				nr_missing_stacks += alloc.count;
-			if (STACK_ID_COLLISION(alloc.stack_id))
-				nr_collision_stacks += alloc.count;
-			continue;
-		}
-
-		memcpy(&allocs[nr_allocs], &alloc, sizeof(alloc));
-		nr_allocs++;
-	}
-
-	qsort(allocs, nr_allocs, sizeof(allocs[0]), alloc_size_compare);
-
-	printf("[%d:%d:%d] Top %zu stacks with outstanding allocations:\n",
-			tm->tm_hour, tm->tm_min, tm->tm_sec, nr_allocs);
-
-	print_stack_frames(allocs, nr_allocs, stack_traces_fd);
-
-	if (nr_missing_stacks > 0) {
-		fprintf(stderr, "WARNING: %zu stack traces could not be displayed"
-			" due to memory shortage, including %zu caused by hash collisions."
-			" Consider increasing --stack-storage-size.\n",
-			nr_missing_stacks, nr_collision_stacks);
-	}
-
-	return 0;
-}
-
-__attribute__((unused))
-bool has_kernel_node_tracepoints()
-{
-	return tracepoint_exists("kmem", "kmalloc_node") &&
-		tracepoint_exists("kmem", "kmem_cache_alloc_node");
-}
-
-__attribute__((unused))
-void disable_kernel_node_tracepoints(struct memleak_bpf *skel)
-{
-	bpf_program__set_autoload(skel->progs.memleak__kmalloc_node, false);
-	bpf_program__set_autoload(skel->progs.memleak__kmem_cache_alloc_node, false);
-}
-
-__attribute__((unused))
-void disable_kernel_percpu_tracepoints(struct memleak_bpf *skel)
-{
-	bpf_program__set_autoload(skel->progs.memleak__percpu_alloc_percpu, false);
-	bpf_program__set_autoload(skel->progs.memleak__percpu_free_percpu, false);
 }
 
 void disable_kernel_tracepoints(struct memleak_bpf *skel)
