@@ -24,8 +24,6 @@
 #include "memleak.skel.h"
 #include "trace_helpers.h"
 
-
-
 static struct env {
 	int interval;
 	int nr_intervals;
@@ -113,10 +111,6 @@ static int print_outstanding_allocs(int allocs_fd, int stack_traces_fd);
 static void disable_kernel_tracepoints(struct memleak_bpf *skel);
 static int attach_uprobes(struct memleak_bpf *skel);
 
-const char *argp_program_version = "memleak 0.1";
-const char *argp_program_bug_address =
-	"https://github.com/iovisor/bcc/tree/master/libbpf-tools";
-
 const char argp_args_doc[] =
 "Trace outstanding memory allocations\n"
 "\n"
@@ -192,18 +186,13 @@ int main(int argc, char *argv[])
 	if (!stack) {
 		fprintf(stderr, "failed to allocate stack array\n");
 		ret = -ENOMEM;
-
 		goto cleanup;
 	}
 
-
-
 	allocs = calloc(ALLOCS_MAX_ENTRIES, sizeof(*allocs));
-
 	if (!allocs) {
 		fprintf(stderr, "failed to allocate array\n");
 		ret = -ENOMEM;
-
 		goto cleanup;
 	}
 
@@ -235,7 +224,6 @@ int main(int argc, char *argv[])
 	ret = memleak_bpf__load(skel);
 	if (ret) {
 		fprintf(stderr, "failed to load bpf object\n");
-
 		goto cleanup;
 	}
 
@@ -245,14 +233,12 @@ int main(int argc, char *argv[])
 	ret = attach_uprobes(skel);
 	if (ret) {
 		fprintf(stderr, "failed to attach uprobes\n");
-
 		goto cleanup;
 	}
 
 	ret = memleak_bpf__attach(skel);
 	if (ret) {
 		fprintf(stderr, "failed to attach bpf program(s)\n");
-
 		goto cleanup;
 	}
 
@@ -260,7 +246,6 @@ int main(int argc, char *argv[])
 	if (!syms_cache) {
 		fprintf(stderr, "Failed to create syms_cache\n");
 		ret = -ENOMEM;
-
 		goto cleanup;
 	}
 
@@ -270,9 +255,7 @@ int main(int argc, char *argv[])
 
 	while (!exiting && env.nr_intervals) {
 		env.nr_intervals--;
-
 		sleep(env.interval);
-
 		print_outstanding_allocs(allocs_fd, stack_traces_fd);
 	}
 
