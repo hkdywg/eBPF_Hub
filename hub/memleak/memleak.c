@@ -24,6 +24,10 @@
 #include "memleak.skel.h"
 #include "trace_helpers.h"
 
+#ifdef USE_BLAZESYM
+#include <blazesym.h>
+#endif
+
 static struct env {
 	int interval;
 	int nr_intervals;
@@ -42,6 +46,8 @@ static struct env {
 	.page_size = 1,
 };
 
+#define MAX_MANUAL_STACK_DEPTH 8
+
 struct allocation_node {
 	uint64_t address;
 	size_t size;
@@ -53,6 +59,8 @@ struct allocation {
 	size_t size;
 	size_t count;
 	struct allocation_node* allocations;
+	uint64_t manual_stack[MAX_MANUAL_STACK_DEPTH];
+	int manual_stack_cnt;
 };
 
 #define __ATTACH_UPROBE(skel, sym_name, prog_name, is_retprobe) \
@@ -88,8 +96,7 @@ struct allocation {
 #define ATTACH_UPROBE_CHECKED(skel, sym_name, prog_name) __ATTACH_UPROBE_CHECKED(skel, sym_name, prog_name, false)
 #define ATTACH_URETPROBE_CHECKED(skel, sym_name, prog_name) __ATTACH_UPROBE_CHECKED(skel, sym_name, prog_name, true)
 
-/* Attach to target binary (for C++ operator new/delete which may be statically linked) */
-#define __ATTACH_UPROBE_TARGET(skel, sym_name, prog_name, is_retprobe) \
+#define __ATTACH_UPROBE_LIB(skel, lib_name, sym_name, prog_name, is_retprobe) \
 	do { \
 		LIBBPF_OPTS(bpf_uprobe_opts, uprobe_opts, \
 				.func_name = #sym_name, \
@@ -97,13 +104,13 @@ struct allocation {
 		skel->links.prog_name = bpf_program__attach_uprobe_opts( \
 				skel->progs.prog_name, \
 				env.pid, \
-				NULL, \
+				lib_name, \
 				0, \
 				&uprobe_opts); \
 	} while (false)
 
-#define ATTACH_UPROBE_TARGET(skel, sym_name, prog_name) __ATTACH_UPROBE_TARGET(skel, sym_name, prog_name, false)
-#define ATTACH_URETPROBE_TARGET(skel, sym_name, prog_name) __ATTACH_UPROBE_TARGET(skel, sym_name, prog_name, true)
+#define ATTACH_UPROBE_LIB(skel, lib, sym_name, prog_name) __ATTACH_UPROBE_LIB(skel, lib, sym_name, prog_name, false)
+#define ATTACH_URETPROBE_LIB(skel, lib, sym_name, prog_name) __ATTACH_UPROBE_LIB(skel, lib, sym_name, prog_name, true)
 
 /*
  * -EFAULT in get_stackid normally means the stack-trace is not available,
@@ -121,7 +128,14 @@ static void sig_handler(int signo);
 static long argp_parse_long(int key, const char *arg, struct argp_state *state);
 static error_t argp_parse_arg(int key, char *arg, struct argp_state *state);
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args);
-static void print_stack_frames_by_syms_cache();
+#ifdef USE_BLAZESYM
+static void print_stack_frame_by_blazesym(size_t frame, uint64_t addr, const struct blaze_sym *sym);
+static void print_stack_frames_by_blazesym(void);
+static void print_manual_stack_frames_blazesym(const uint64_t *manual_stack, int cnt);
+#else
+static void print_stack_frames_by_syms_cache(void);
+static void print_manual_stack_frames(const uint64_t *manual_stack, int cnt);
+#endif
 static int print_stack_frames(struct allocation *allocs, size_t nr_allocs, int stack_traces_fd);
 static int alloc_size_compare(const void *a, const void *b);
 static int print_outstanding_allocs(int allocs_fd, int stack_traces_fd);
@@ -152,8 +166,13 @@ static struct sigaction sig_action = {
 	.sa_handler = sig_handler
 };
 
+#ifdef USE_BLAZESYM
+static struct blaze_symbolizer *symbolizer;
+static struct blaze_symbolize_src_process src_process;
+#else
 struct syms_cache *syms_cache;
 struct ksyms *ksyms;
+#endif
 static void (*print_stack_frames_func)();
 
 static uint64_t *stack;
@@ -259,6 +278,23 @@ int main(int argc, char *argv[])
 		goto cleanup;
 	}
 
+#ifdef USE_BLAZESYM
+	src_process = (struct blaze_symbolize_src_process){
+		.type_size = sizeof(src_process),
+		.pid = env.pid,
+		.debug_syms = true,
+		.perf_map = false,
+		.no_map_files = false,
+	};
+
+	symbolizer = blaze_symbolizer_new();
+	if (!symbolizer) {
+		fprintf(stderr, "Failed to create blaze symbolizer\n");
+		ret = -ENOMEM;
+		goto cleanup;
+	}
+	print_stack_frames_func = print_stack_frames_by_blazesym;
+#else
 	syms_cache = syms_cache__new(0);
 	if (!syms_cache) {
 		fprintf(stderr, "Failed to create syms_cache\n");
@@ -267,6 +303,7 @@ int main(int argc, char *argv[])
 	}
 
 	print_stack_frames_func = print_stack_frames_by_syms_cache;
+#endif
 
 	print_headers();
 
@@ -277,10 +314,14 @@ int main(int argc, char *argv[])
 	}
 
 cleanup:
-if (syms_cache)
+#ifdef USE_BLAZESYM
+	blaze_symbolizer_free(symbolizer);
+#else
+	if (syms_cache)
 		syms_cache__free(syms_cache);
 	if (ksyms)
 		ksyms__free(ksyms);
+#endif
 	memleak_bpf__destroy(skel);
 
 	free(allocs);
@@ -347,7 +388,139 @@ void sig_handler(int signo)
 }
 
 
-void print_stack_frames_by_syms_cache()
+static char* demangle_buf;
+static size_t demangle_buf_len;
+
+static const char* demangle_symbol(const char* name)
+{
+	extern char* __cxa_demangle(const char*, char*, size_t*, int*);
+	int status;
+	char* result = __cxa_demangle(name, demangle_buf,
+	                               &demangle_buf_len, &status);
+	if (status == 0) {
+		demangle_buf = result;
+		return result;
+	}
+	return name;
+}
+
+#ifdef USE_BLAZESYM
+static bool is_system_library(const char *module)
+{
+	if (!module)
+		return true;
+
+	return (strstr(module, "/lib/") != NULL ||
+	        strstr(module, "/usr/lib/") != NULL ||
+	        strstr(module, "linux-vdso") != NULL ||
+	        strstr(module, "linux-vsyscall") != NULL ||
+	        strstr(module, "[vdso]") != NULL ||
+	        strstr(module, "[vsyscall]") != NULL);
+}
+
+static bool is_cpp_stdlib_symbol(const char *name)
+{
+	if (!name)
+	 return true;
+
+  return (strncmp(name, "std::", 5) == 0 ||
+            strncmp(name, "__cxxabiv1::", 12) == 0 ||
+            strncmp(name, "_ZSt", 4) == 0 ||
+            strncmp(name, "_ZNSt", 5) == 0 ||
+            strncmp(name, "_ZTV", 4) == 0 ||
+            strncmp(name, "_ZTI", 4) == 0 ||
+            strncmp(name, "_ZNKSt", 6) == 0 ||
+            strncmp(name, "_GLOBAL__", 9) == 0 ||  /* Filter out C++ global constructor/destructor code */
+            strstr(name, "ostream") != NULL ||
+            strstr(name, "istream") != NULL ||
+            strstr(name, "basic_") != NULL);
+}
+
+void print_stack_frame_by_blazesym(size_t frame, uint64_t addr, const struct blaze_sym *sym)
+{
+	if (!sym || !sym->name) {
+		printf("\t%zu [<%016lx>] <%s>\n", frame, addr, "null sym");
+		return;
+	}
+
+	const char *loc = NULL;
+	if (sym->code_info.file && strlen(sym->code_info.file))
+		loc = sym->code_info.file;
+	else if (sym->module && strlen(sym->module))
+		loc = sym->module;
+
+	printf("\t%zu [<%016lx>] %s+0x%zx", frame, addr, demangle_symbol(sym->name), sym->offset);
+	if (loc && sym->code_info.line)
+		printf(" %s:%u", loc, sym->code_info.line);
+	printf("\n");
+}
+
+void print_stack_frames_by_blazesym(void)
+{
+	const struct blaze_syms *syms;
+
+	syms = blaze_symbolize_process_abs_addrs(symbolizer, &src_process, stack, env.perf_max_stack_depth);
+
+	if (!syms)
+		return;
+
+	for (size_t j = 0; j < syms->cnt && j < env.perf_max_stack_depth; ++j) {
+		const uint64_t addr = stack[j];
+
+		if (addr == 0)
+			break;
+
+		const struct blaze_sym *sym = &syms->syms[j];
+
+		if (!sym->name) {
+			print_stack_frame_by_blazesym(j, addr, NULL);
+			continue;
+		}
+
+		print_stack_frame_by_blazesym(j, addr, sym);
+	}
+
+	blaze_syms_free(syms);
+}
+
+static void print_manual_stack_frames_blazesym(const uint64_t *manual_stack, int cnt)
+{
+	const struct blaze_syms *syms;
+
+	syms = blaze_symbolize_process_abs_addrs(symbolizer, &src_process, manual_stack, cnt);
+
+	if (!syms)
+		return;
+
+	printf("\tCall stack:\n");
+	int frame_idx = 0;
+	for (int j = 0; j < syms->cnt && j < cnt && j < MAX_MANUAL_STACK_DEPTH; ++j) {
+		const uint64_t addr = manual_stack[j];
+
+		if (addr == 0)
+			break;
+
+		const struct blaze_sym *sym = &syms->syms[j];
+
+		if (!sym->name)
+			continue;
+
+		if (is_system_library(sym->module))
+			continue;
+
+		if (is_cpp_stdlib_symbol(sym->name))
+			continue;
+
+		print_stack_frame_by_blazesym(frame_idx++, addr, sym);
+	}
+
+	if (frame_idx == 0)
+		printf("\t(no symbols resolved)\n");
+
+	blaze_syms_free(syms);
+}
+#else
+void print_stack_frames_by_syms_cache(void)
 {
 	const struct syms *syms = syms_cache__get_syms(syms_cache, env.pid);
 	if (!syms) {
@@ -366,13 +539,44 @@ void print_stack_frames_by_syms_cache()
 		if (ret == 0) {
 			printf("\t%zu [<%016lx>]", i, addr);
 			if (sinfo.sym_name)
-				printf(" %s+0x%lx", sinfo.sym_name, sinfo.sym_offset);
+				printf(" %s+0x%lx", demangle_symbol(sinfo.sym_name), sinfo.sym_offset);
 			printf(" [%s]\n", sinfo.dso_name);
 		} else {
 			printf("\t%zu [<%016lx>] <%s>\n", i, addr, "null sym");
 		}
 	}
 }
+
+static void print_manual_stack_frames(const uint64_t *manual_stack, int cnt)
+{
+	const struct syms *syms = syms_cache__get_syms(syms_cache, env.pid);
+	if (!syms) {
+		fprintf(stderr, "Failed to get syms\n");
+		return;
+	}
+
+	printf("\tCall stack:\n");
+	int frame_idx = 0;
+	for (int i = 0; i < cnt && i < MAX_MANUAL_STACK_DEPTH; i++) {
+		const uint64_t addr = manual_stack[i];
+		if (addr == 0)
+			break;
+
+		struct sym_info sinfo;
+		int ret = syms__map_addr_dso(syms, addr, &sinfo);
+		if (ret == 0) {
+			printf("\t%d [<%016lx>]", frame_idx, addr);
+			if (sinfo.sym_name)
+				printf(" %s+0x%lx", demangle_symbol(sinfo.sym_name), sinfo.sym_offset);
+			printf(" [%s]\n", sinfo.dso_name);
+			frame_idx++;
+		}
+	}
+
+	if (frame_idx == 0)
+		printf("\t(no symbols resolved)\n");
+}
+#endif
 
 int print_stack_frames(struct allocation *allocs, size_t nr_allocs, int stack_traces_fd)
 {
@@ -381,16 +585,21 @@ int print_stack_frames(struct allocation *allocs, size_t nr_allocs, int stack_tr
 
 		printf("%zu bytes in %zu allocations from stack\n", alloc->size, alloc->count);
 
-		if (bpf_map_lookup_elem(stack_traces_fd, &alloc->stack_id, stack)) {
-			if (errno == ENOENT)
-				continue;
-
-			perror("failed to lookup stack trace");
-
-			return -errno;
+		if (alloc->manual_stack_cnt > 0) {
+#ifdef USE_BLAZESYM
+			print_manual_stack_frames_blazesym(alloc->manual_stack, alloc->manual_stack_cnt);
+#else
+			print_manual_stack_frames(alloc->manual_stack, alloc->manual_stack_cnt);
+#endif
+		} else {
+			if (bpf_map_lookup_elem(stack_traces_fd, &alloc->stack_id, stack)) {
+				if (errno == ENOENT)
+					continue;
+				perror("failed to lookup stack trace");
+				return -errno;
+			}
+			(*print_stack_frames_func)();
 		}
-
-		(*print_stack_frames_func)();
 	}
 
 	return 0;
@@ -482,8 +691,13 @@ int print_outstanding_allocs(int allocs_fd, int stack_traces_fd)
 			.stack_id = alloc_info.stack_id,
 			.size = alloc_info.size,
 			.count = 1,
-			.allocations = NULL
+			.allocations = NULL,
+			.manual_stack_cnt = alloc_info.manual_stack_cnt
 		};
+		
+		for (int j = 0; j < alloc_info.manual_stack_cnt && j < MAX_MANUAL_STACK_DEPTH; j++) {
+			alloc.manual_stack[j] = alloc_info.manual_stack[j];
+		}
 
 		memcpy(&allocs[nr_allocs], &alloc, sizeof(alloc));
 		nr_allocs++;
@@ -527,8 +741,52 @@ void disable_kernel_tracepoints(struct memleak_bpf *skel)
 	bpf_program__set_autoload(skel->progs.memleak__percpu_free_percpu, false);
 }
 
+static bool is_library_loaded(pid_t pid, const char *lib_name)
+{
+	char maps_path[256];
+	char line[512];
+	FILE *f;
+	bool found = false;
+
+	snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+	f = fopen(maps_path, "r");
+	if (!f)
+		return false;
+
+	while (fgets(line, sizeof(line), f)) {
+		if (strstr(line, lib_name)) {
+			found = true;
+			break;
+		}
+	}
+	fclose(f);
+	return found;
+}
+
+static char *get_pid_exe_path(pid_t pid)
+{
+	char path[256];
+	char *exe_path = NULL;
+	ssize_t len;
+
+	snprintf(path, sizeof(path), "/proc/%d/exe", pid);
+	exe_path = malloc(256);
+	if (!exe_path)
+		return NULL;
+
+	len = readlink(path, exe_path, 255);
+	if (len < 0) {
+		free(exe_path);
+		return NULL;
+	}
+	exe_path[len] = '\0';
+	return exe_path;
+}
+
 int attach_uprobes(struct memleak_bpf *skel)
 {
+	char *exe_path = NULL;
+
 	ATTACH_UPROBE_CHECKED(skel, malloc, malloc_enter);
 	ATTACH_URETPROBE_CHECKED(skel, malloc, malloc_exit);
 
@@ -562,15 +820,39 @@ int attach_uprobes(struct memleak_bpf *skel)
 	ATTACH_UPROBE(skel, aligned_alloc, aligned_alloc_enter);
 	ATTACH_URETPROBE(skel, aligned_alloc, aligned_alloc_exit);
 
-	/* C++ operator new/delete - use mangled names, attach to target binary */
-	ATTACH_UPROBE_TARGET(skel, _Znwm, operator_new_enter);
-	ATTACH_URETPROBE_TARGET(skel, _Znwm, operator_new_exit);
-	ATTACH_UPROBE_TARGET(skel, _Znam, operator_new_array_enter);
-	ATTACH_URETPROBE_TARGET(skel, _Znam, operator_new_array_exit);
-	ATTACH_UPROBE_TARGET(skel, _ZdlPv, operator_delete_enter);
-	ATTACH_UPROBE_TARGET(skel, _ZdlPvm, operator_delete_sized_enter);
-	ATTACH_UPROBE_TARGET(skel, _ZdaPv, operator_delete_array_enter);
-	ATTACH_UPROBE_TARGET(skel, _ZdaPvm, operator_delete_array_sized_enter);
+	/* Check if libstdc++ is actually loaded by the target process */
+	if (is_library_loaded(env.pid, "libstdc++")) {
+		printf("libstdc++ is loaded, attaching to shared library\n");
+		ATTACH_UPROBE_LIB(skel, "libstdc++.so.6", _Znwm, operator_new_enter);
+		ATTACH_URETPROBE_LIB(skel, "libstdc++.so.6", _Znwm, operator_new_exit);
+		ATTACH_UPROBE_LIB(skel, "libstdc++.so.6", _Znam, operator_new_array_enter);
+		ATTACH_URETPROBE_LIB(skel, "libstdc++.so.6", _Znam, operator_new_array_exit);
+		ATTACH_UPROBE_LIB(skel, "libstdc++.so.6", _ZdlPv, operator_delete_enter);
+		ATTACH_UPROBE_LIB(skel, "libstdc++.so.6", _ZdlPvm, operator_delete_sized_enter);
+		ATTACH_UPROBE_LIB(skel, "libstdc++.so.6", _ZdaPv, operator_delete_array_enter);
+		ATTACH_UPROBE_LIB(skel, "libstdc++.so.6", _ZdaPvm, operator_delete_array_sized_enter);
+	} else {
+		printf("libstdc++ not loaded (static linking), attaching to main binary\n");
+		exe_path = get_pid_exe_path(env.pid);
+		if (!exe_path) {
+			fprintf(stderr, "Failed to get process executable path\n");
+			return -1;
+		}
+		printf("Main binary: %s\n", exe_path);
+
+		ATTACH_UPROBE_LIB(skel, exe_path, _Znwm, operator_new_enter);
+		__CHECK_PROGRAM(skel, operator_new_enter);
+		ATTACH_URETPROBE_LIB(skel, exe_path, _Znwm, operator_new_exit);
+		__CHECK_PROGRAM(skel, operator_new_exit);
+		ATTACH_UPROBE_LIB(skel, exe_path, _Znam, operator_new_array_enter);
+		ATTACH_URETPROBE_LIB(skel, exe_path, _Znam, operator_new_array_exit);
+		ATTACH_UPROBE_LIB(skel, exe_path, _ZdlPv, operator_delete_enter);
+		ATTACH_UPROBE_LIB(skel, exe_path, _ZdlPvm, operator_delete_sized_enter);
+		ATTACH_UPROBE_LIB(skel, exe_path, _ZdaPv, operator_delete_array_enter);
+		ATTACH_UPROBE_LIB(skel, exe_path, _ZdaPvm, operator_delete_array_sized_enter);
+
+		free(exe_path);
+	}
 
 	return 0;
 }

@@ -24,13 +24,21 @@ LOCAL_SRCS      := $(LOCAL_PATH)/memleak.c \
                    $(LOCAL_PATH)/uprobe_helpers.c
 
 LOCAL_CFLAGS    := -Wall -g
-LOCAL_LDFLAGS   := -lelf -lz
+LOCAL_LDFLAGS   := -lelf -lz -lstdc++
+
+# Force g++ linker for C++ ABI functions (__cxa_demangle)
+LOCAL_FORCE_CPP_LINK := true
 
 include $(BUILD_APP)
 
 .PHONY: $(LOCAL_TARGET)
 
+$(LOCAL_MODULE): LOCAL_LDFLAGS := -lelf -lz -lstdc++
+
 $(LOCAL_TARGET): $(LOCAL_MODULE)
 	@echo "Build $@ Done."
+ifdef USE_BLAZESYM
+	@echo "  (with blazesym support)"
+endif
 
 $(call add-target-into-build, $(LOCAL_TARGET))
