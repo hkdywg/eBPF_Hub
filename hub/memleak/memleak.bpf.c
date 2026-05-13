@@ -312,6 +312,61 @@ int BPF_URETPROBE(pvalloc_exit)
 	return gen_alloc_exit(ctx);
 }
 
+/*
+ * C++ operator new/delete support
+ * Covers: operator new, operator new[], operator delete, operator delete[]
+ * Also covers sized delete variants (C++14): operator delete(void*, size_t), operator delete[](void*, size_t)
+ */
+SEC("uprobe")
+int BPF_UPROBE(operator_new_enter, size_t size)
+{
+	return gen_alloc_enter(size);
+}
+
+SEC("uretprobe")
+int BPF_URETPROBE(operator_new_exit)
+{
+	return gen_alloc_exit(ctx);
+}
+
+SEC("uprobe")
+int BPF_UPROBE(operator_new_array_enter, size_t size)
+{
+	return gen_alloc_enter(size);
+}
+
+SEC("uretprobe")
+int BPF_URETPROBE(operator_new_array_exit)
+{
+	return gen_alloc_exit(ctx);
+}
+
+SEC("uprobe")
+int BPF_UPROBE(operator_delete_enter, void *address)
+{
+	return gen_free_enter(address);
+}
+
+SEC("uprobe")
+int BPF_UPROBE(operator_delete_sized_enter, void *address, size_t size)
+{
+	/* sized delete: size parameter is ignored, just use address */
+	return gen_free_enter(address);
+}
+
+SEC("uprobe")
+int BPF_UPROBE(operator_delete_array_enter, void *address)
+{
+	return gen_free_enter(address);
+}
+
+SEC("uprobe")
+int BPF_UPROBE(operator_delete_array_sized_enter, void *address, size_t size)
+{
+	/* sized array delete: size parameter is ignored */
+	return gen_free_enter(address);
+}
+
 SEC("tracepoint/kmem/kmalloc")
 int memleak__kmalloc(void *ctx)
 {

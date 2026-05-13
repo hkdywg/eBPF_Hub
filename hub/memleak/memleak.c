@@ -88,6 +88,23 @@ struct allocation {
 #define ATTACH_UPROBE_CHECKED(skel, sym_name, prog_name) __ATTACH_UPROBE_CHECKED(skel, sym_name, prog_name, false)
 #define ATTACH_URETPROBE_CHECKED(skel, sym_name, prog_name) __ATTACH_UPROBE_CHECKED(skel, sym_name, prog_name, true)
 
+/* Attach to target binary (for C++ operator new/delete which may be statically linked) */
+#define __ATTACH_UPROBE_TARGET(skel, sym_name, prog_name, is_retprobe) \
+	do { \
+		LIBBPF_OPTS(bpf_uprobe_opts, uprobe_opts, \
+				.func_name = #sym_name, \
+				.retprobe = is_retprobe); \
+		skel->links.prog_name = bpf_program__attach_uprobe_opts( \
+				skel->progs.prog_name, \
+				env.pid, \
+				NULL, \
+				0, \
+				&uprobe_opts); \
+	} while (false)
+
+#define ATTACH_UPROBE_TARGET(skel, sym_name, prog_name) __ATTACH_UPROBE_TARGET(skel, sym_name, prog_name, false)
+#define ATTACH_URETPROBE_TARGET(skel, sym_name, prog_name) __ATTACH_UPROBE_TARGET(skel, sym_name, prog_name, true)
+
 /*
  * -EFAULT in get_stackid normally means the stack-trace is not available,
  * such as getting kernel stack trace in user mode
@@ -544,6 +561,16 @@ int attach_uprobes(struct memleak_bpf *skel)
 
 	ATTACH_UPROBE(skel, aligned_alloc, aligned_alloc_enter);
 	ATTACH_URETPROBE(skel, aligned_alloc, aligned_alloc_exit);
+
+	/* C++ operator new/delete - use mangled names, attach to target binary */
+	ATTACH_UPROBE_TARGET(skel, _Znwm, operator_new_enter);
+	ATTACH_URETPROBE_TARGET(skel, _Znwm, operator_new_exit);
+	ATTACH_UPROBE_TARGET(skel, _Znam, operator_new_array_enter);
+	ATTACH_URETPROBE_TARGET(skel, _Znam, operator_new_array_exit);
+	ATTACH_UPROBE_TARGET(skel, _ZdlPv, operator_delete_enter);
+	ATTACH_UPROBE_TARGET(skel, _ZdlPvm, operator_delete_sized_enter);
+	ATTACH_UPROBE_TARGET(skel, _ZdaPv, operator_delete_array_enter);
+	ATTACH_UPROBE_TARGET(skel, _ZdaPvm, operator_delete_array_sized_enter);
 
 	return 0;
 }
