@@ -150,7 +150,7 @@ coverage/
 ###################################################
 
 # Sisyphus plan files (optional - uncomment if needed)
-# .sisyphus/
+.sisyphus/
 
 # Bash completion helper (generated, not needed in repo)
 .bash_completion
